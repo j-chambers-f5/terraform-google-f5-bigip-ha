@@ -39,3 +39,14 @@ output "cluster_tag" {
   The network tag generated to uniquely identify the instances in this HA cluster.
   EOD
 }
+
+output "network_endpoints" {
+  value = { for k, v in google_compute_instance.bigip : v.name => {
+    instance   = v.name
+    ip_address = v.network_interface[local.dsc_data_plane_index].network_ip
+    zone       = v.zone
+  } }
+  description = <<-EOD
+  A map of BIG-IP instance name to Compute Engine zone and data-plane IP address for use with GCE_VM_IP Network Endpoint Groups.
+  EOD
+}

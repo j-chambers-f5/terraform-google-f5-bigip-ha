@@ -177,6 +177,7 @@ No modules.
 | <a name="output_cluster_tag"></a> [cluster\_tag](#output\_cluster\_tag) | The network tag generated to uniquely identify the instances in this HA cluster. |
 | <a name="output_instances_by_zone"></a> [instances\_by\_zone](#output\_instances\_by\_zone) | A map of Compute Engine zones to a list of instance self-links. |
 | <a name="output_names"></a> [names](#output\_names) | The instance names of the BIG-IPs. |
+| <a name="output_network_endpoints"></a> [network\_endpoints](#output\_network\_endpoints) | A map of BIG-IP instance name to Compute Engine zone and data-plane IP address for use with GCE\_VM\_IP Network Endpoint Groups. |
 | <a name="output_private_mgmt_ips"></a> [private\_mgmt\_ips](#output\_private\_mgmt\_ips) | A map of BIG-IP instance name to private IP address on the management interface. |
 | <a name="output_public_mgmt_ips"></a> [public\_mgmt\_ips](#output\_public\_mgmt\_ips) | A map of BIG-IP instance name to public IP address, if any, on the management interface. |
 | <a name="output_self_links"></a> [self\_links](#output\_self\_links) | A map of BIG-IP instance name to fully-qualified self-links. |

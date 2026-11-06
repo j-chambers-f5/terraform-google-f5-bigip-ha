@@ -210,6 +210,9 @@ def test_output_values(
     private_mgmt_ips = cast("dict[str, str]", output_values["private_mgmt_ips"])
     assert private_mgmt_ips
     assert len(private_mgmt_ips) == len(expected_names)
+    network_endpoints = cast("dict[str, dict[str, str]]", output_values["network_endpoints"])
+    assert network_endpoints
+    assert len(network_endpoints) == len(expected_names)
     for name in expected_names:
         assert name in self_links
         assert re.search(f"projects/{project_id}/zones/{region}-[a-z]/instances/{name}$", self_links[name])
@@ -221,6 +224,13 @@ def test_output_values(
         private_mgmt_ip = ipaddress.IPv4Address(private_mgmt_ips[name])
         assert private_mgmt_ip.is_private
         assert private_mgmt_ip in subnet_ranges[1]
+        assert name in network_endpoints
+        endpoint = network_endpoints[name]
+        assert endpoint["instance"] == name
+        assert re.match(f"^{region}-[a-z]$", endpoint["zone"])
+        endpoint_ip = ipaddress.IPv4Address(endpoint["ip_address"])
+        assert endpoint_ip.is_private
+        assert endpoint_ip in subnet_ranges[0]
     instances_by_zone = cast("dict[str, list[str]]", output_values["instances_by_zone"])
     assert len(instances_by_zone) == len(expected_names)
     for zone, links in instances_by_zone.items():

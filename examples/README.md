@@ -6,6 +6,12 @@ other Google Cloud resources.
 * [stateful-nlb]
   Provisions an active-standby HA pair of BIG-IP VEs with a Google Cloud External Network Load Balancer providing a
   public VIP
+* [stateful-nlb-garp]
+  Provisions an active-standby HA pair of BIG-IP VEs with a Google Cloud External Network Load Balancer using backend
+  service fast IP move (`GARP_RA`) and `GCE_VM_IP` Network Endpoint Groups
+* [stateful-scaleout-pairs]
+  Provisions `N` independent active-standby HA pairs of BIG-IP VEs with per-pair Google Cloud External Network Load
+  Balancers using backend service fast IP move (`GARP_RA`) and `GCE_VM_IP` Network Endpoint Groups
 * [stateless-nlb]
   Provisions an active-active HA pair of BIG-IP VEs as a Compute Engine Managed Instance Group, with a Google Cloud
   Network Load Balancer providing a public VIP
@@ -96,4 +102,6 @@ diff -x .git -x '*~' -x '*#' -Naur examples/stateful-nlb/templates/runtime-init-
 
 [stateful-nlb]: ./stateful-nlb/
 [stateful-nlb-byol]: ./stateful-nlb-byol/
+[stateful-nlb-garp]: ./stateful-nlb-garp/
+[stateful-scaleout-pairs]: ./stateful-scaleout-pairs/
 [stateless-nlb]: ./stateless-nlb/

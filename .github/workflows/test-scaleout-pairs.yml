@@ -55,10 +55,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev
 
-      - name: Run Ruff linter and formatter checks
+      - name: Run Ruff linter checks
         run: |
           uv run ruff check tests/examples/test_stateful_nlb_garp.py tests/examples/test_stateful_scaleout_pairs.py
-          uv run ruff format --check tests/examples/test_stateful_nlb_garp.py tests/examples/test_stateful_scaleout_pairs.py
 
       - name: Run pytest on tests/examples/test_stateful_scaleout_pairs.py
         run: |

@@ -103,8 +103,7 @@ def instances(
     self_links = cast("dict[str, str]", fixture_output["self_links"])
     assert self_links
     instances = [
-        wait_for_onboarding_complete(instance)
-        for instance in instances_builder([self_link for _, self_link in self_links.items()])
+        wait_for_onboarding_complete(instance) for instance in instances_builder(list(self_links.values()))
     ]
     assert len(instances) == DEFAULT_TARGET_SIZE * NUM_PAIRS
     return instances
@@ -128,7 +127,7 @@ def test_output_values(
     assert fixture_output is not None
     vips = cast("dict[str, str]", fixture_output["vips"])
     assert len(vips) == NUM_PAIRS
-    for _, vip in vips.items():
+    for vip in vips.values():
         address = ipaddress.IPv4Address(vip)
         assert address
         assert address.is_global
@@ -150,8 +149,8 @@ def test_instances(
     for instance in instances:
         bigip_is_ready_asserter(instance=instance, password=admin_password)
     pairs_self_links = cast("dict[str, dict[str, str]]", fixture_output["pairs_self_links"])
-    for _, pair_links in pairs_self_links.items():
-        pair_instances = instances_builder([self_link for _, self_link in pair_links.items()])
+    for pair_links in pairs_self_links.values():
+        pair_instances = instances_builder(list(pair_links.values()))
         active_standby_asserter(instances=pair_instances, password=admin_password)
 
 
@@ -162,7 +161,7 @@ def test_vip(
     assert fixture_output is not None
     vips = cast("dict[str, str]", fixture_output["vips"])
     assert len(vips) == NUM_PAIRS
-    for _, vip in vips.items():
+    for vip in vips.values():
         assert vip
         response = requests.get(url=f"https://{vip}/", verify=False)
         assert response.status_code == requests.codes["ok"]

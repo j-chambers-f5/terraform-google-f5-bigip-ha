@@ -1,0 +1,167 @@
+# GitHub Actions workflow to validate and test examples/stateful-scaleout-pairs
+# yamllint disable rule:line-length
+# spell-checker: disable
+---
+name: test-stateful-scaleout-pairs
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-test:
+    name: Validate Terraform & Test Cross-Pair L7 dSSM Failover
+    runs-on: ubuntu-latest
+    env:
+      PAIR1_VIP: "136.113.220.229"
+      PAIR2_VIP: "34.60.230.148"
+      REDIS_ENDPOINT: "172.16.2.2:6379"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: 1.11.6
+
+      - name: Check OpenTofu formatting and validate modules
+        run: |
+          tofu fmt -check -recursive
+          tofu init -backend=false
+          tofu validate
+          for ex in stateful-nlb-garp stateful-scaleout-pairs; do
+            cp -r "examples/${ex}" "/tmp/${ex}"
+            sed -i "s|git::https://github.com/f5devcentral/terraform-google-f5-bigip-ha?ref=v0.2.3|${GITHUB_WORKSPACE}|g" "/tmp/${ex}/main.tf"
+            tofu -chdir="/tmp/${ex}" init -backend=false
+            tofu -chdir="/tmp/${ex}" validate
+          done
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Run Ruff linter and formatter checks
+        run: |
+          uv run ruff check tests/examples/test_stateful_nlb_garp.py tests/examples/test_stateful_scaleout_pairs.py
+          uv run ruff format --check tests/examples/test_stateful_nlb_garp.py tests/examples/test_stateful_scaleout_pairs.py
+
+      - name: Run pytest on tests/examples/test_stateful_scaleout_pairs.py
+        run: |
+          cat <<'EOF' > /tmp/live_fixture_plugin.py
+          import os
+          import pytest
+
+          @pytest.fixture(scope="module")
+          def fixture_output():
+              return {
+                  "vips": {
+                      "pair-01": os.environ["PAIR1_VIP"],
+                      "pair-02": os.environ["PAIR2_VIP"],
+                  },
+                  "vip": os.environ["PAIR1_VIP"],
+                  "admin_password_secret_id": "jc-scale-pairs",
+                  "redis_endpoint": os.environ["REDIS_ENDPOINT"],
+              }
+          EOF
+          PYTHONPATH=/tmp uv run pytest -o addopts="" -v -s -p live_fixture_plugin \
+            tests/examples/test_stateful_scaleout_pairs.py \
+            -k "test_output_values or test_vip or test_l7_state_retained_across_pair_failover"
+
+      - name: Generate Live Cross-Pair L7 State Retention Summary
+        run: |
+          uv run python3 - <<'EOF'
+          import json
+          import os
+          import uuid
+          import requests
+          import urllib3
+
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+          pair1_vip = os.environ["PAIR1_VIP"]
+          pair2_vip = os.environ["PAIR2_VIP"]
+          session_id = str(uuid.uuid4())
+          expected_state = f"state-{uuid.uuid4().hex[:8]}"
+
+          steps = [
+              (
+                  "1. Initialize Session on pair-01",
+                  pair1_vip,
+                  {"X-Session-ID": session_id, "X-Session-State": expected_state},
+                  "pair-01",
+                  "NEW-Session-WriteThrough",
+              ),
+              (
+                  "2. Repeat Request on pair-01 (No X-Session-State sent)",
+                  pair1_vip,
+                  {"X-Session-ID": session_id},
+                  "pair-01",
+                  "L1-Local-Table",
+              ),
+              (
+                  "3. Failover to pair-02 (No X-Session-State sent)",
+                  pair2_vip,
+                  {"X-Session-ID": session_id},
+                  "pair-02",
+                  "L2-Redis-dSSM",
+              ),
+              (
+                  "4. Repeat Request on pair-02 (Promoted to pair-02 L1)",
+                  pair2_vip,
+                  {"X-Session-ID": session_id},
+                  "pair-02",
+                  "L1-Local-Table",
+              ),
+          ]
+
+          summary_lines = [
+              "## Cross-Pair L7 Session State Retention (`dSSM`) Test Results",
+              "",
+              f"- **Session ID (`X-Session-ID`):** `{session_id}`",
+              f"- **Expected L7 State (`X-Session-State`):** `{expected_state}`",
+              f"- **`pair-01` VIP:** `{pair1_vip}`",
+              f"- **`pair-02` VIP:** `{pair2_vip}`",
+              "",
+              "| Step | Target VIP | Request Headers Sent | HTTP Status | Response `X-BIGIP-Pair` | Response `X-Session-State` | Response `X-Persist-Source` | Result |",
+              "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+          ]
+
+          for label, vip, req_hdrs, exp_pair, exp_source in steps:
+              resp = requests.get(f"https://{vip}/", headers=req_hdrs, verify=False, timeout=10)
+              got_pair = resp.headers.get("X-BIGIP-Pair", "")
+              got_state = resp.headers.get("X-Session-State", "")
+              got_source = resp.headers.get("X-Persist-Source", "")
+              passed = (
+                  resp.status_code == 200
+                  and got_pair == exp_pair
+                  and got_state == expected_state
+                  and got_source == exp_source
+              )
+              status_badge = "✅ PASS" if passed else "❌ FAIL"
+              req_str = ", ".join(f"`{k}: {v}`" for k, v in req_hdrs.items())
+              summary_lines.append(
+                  f"| {label} | `{vip}` | {req_str} | `{resp.status_code}` | `{got_pair}` | **`{got_state}`** | `{got_source}` | {status_badge} |"
+              )
+              print(f"{label}: HTTP {resp.status_code} | Pair={got_pair} | State={got_state} | Source={got_source} -> {status_badge}")
+              assert passed, f"Step failed: {label}"
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write("\n".join(summary_lines) + "\n")
+          EOF

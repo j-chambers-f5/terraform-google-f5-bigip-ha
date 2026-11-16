@@ -64,6 +64,7 @@ jobs:
           cat <<'EOF' > /tmp/live_fixture_plugin.py
           import os
           import pytest
+          import tests.examples.test_stateful_scaleout_pairs as mod
 
           @pytest.fixture(scope="module")
           def fixture_output():
@@ -76,8 +77,10 @@ jobs:
                   "admin_password_secret_id": "jc-scale-pairs",
                   "redis_endpoint": os.environ["REDIS_ENDPOINT"],
               }
+
+          mod.fixture_output = fixture_output
           EOF
-          PYTHONPATH=/tmp uv run pytest -o addopts="" -v -s -p live_fixture_plugin \
+          PYTHONPATH=.:/tmp uv run pytest -o addopts="" -v -s -p live_fixture_plugin \
             tests/examples/test_stateful_scaleout_pairs.py \
             -k "test_output_values or test_vip or test_l7_state_retained_across_pair_failover"
 

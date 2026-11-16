@@ -188,6 +188,7 @@ extension_services:
             allowService:
               - 'tcp:80'
               - 'tcp:443'
+              - 'tcp:1028'
               - 'tcp:4353'
               - 'udp:1026'
             trafficGroup: traffic-group-local-only
@@ -230,6 +231,9 @@ extension_services:
           failoverAddress:
             class: FailoverUnicast
             address: '{{{ SELF_IP_PRIMARY_ADDRESS }}}'
+          mirroring:
+            class: MirrorIp
+            primaryIp: '{{{ SELF_IP_PRIMARY_ADDRESS }}}'
           failoverGroup:
             class: DeviceGroup
             type: sync-failover
@@ -268,12 +272,72 @@ extension_services:
               template: shared
               echo:
                 class: iRule
-                label: echo-responder
-                remark: Simple HTTP responder to echo request host
+                label: dssm-stateful-echo-responder
+                remark: Stateful HTTP responder with L1 and L2 dSSM persistence
                 iRule: |
                   when HTTP_REQUEST {
-                      set resp "{\"host\":\"[HTTP::host]\",\"local_addr\":\"[IP::local_addr]\"}"
-                      HTTP::respond 200 content $resp "Content-Type" "application/json"
+                      set sid [HTTP::header value "X-Session-ID"]
+                      if { $sid eq "" } {
+                          set sid [HTTP::cookie value "SESSIONID"]
+                      }
+                      if { $sid eq "" } {
+                          set sid [format "%08x%08x" [expr {int(rand() * 0xFFFFFFFF)}] [clock clicks]]
+                      }
+                      regsub -all {[^a-zA-Z0-9_.:-]} $sid "" sid
+
+                      set req_state [HTTP::header value "X-Session-State"]
+                      regsub -all {[^a-zA-Z0-9_.:=-]} $req_state "" req_state
+
+                      set state_val ""
+                      set persist_source "NONE"
+
+                      if { $req_state ne "" } {
+                          set state_val $req_state
+                          set persist_source "NEW-Session-WriteThrough"
+                          table set -subtable "SESSION_L1" $sid $state_val 300 300
+                          if { [catch { connect -timeout 1000 -idle 30 -status conn_status ${redis_endpoint} } conn_id] == 0 && $conn_id ne "" } {
+                              set cmd "SET dssm:state:$sid $state_val EX 1800\r\nQUIT\r\n"
+                              send -timeout 1000 -status send_status $conn_id $cmd
+                              set _ [recv -timeout 1000 -status recv_status $conn_id]
+                              catch { close $conn_id }
+                          }
+                      } else {
+                          set state_val [table lookup -subtable "SESSION_L1" $sid]
+                          if { $state_val ne "" } {
+                              set persist_source "L1-Local-Table"
+                          } else {
+                              if { [catch { connect -timeout 1000 -idle 30 -status conn_status ${redis_endpoint} } conn_id] == 0 && $conn_id ne "" } {
+                                  set cmd "GET dssm:state:$sid\r\nQUIT\r\n"
+                                  send -timeout 1000 -status send_status $conn_id $cmd
+                                  set resp [recv -timeout 1000 -status recv_status $conn_id]
+                                  catch { close $conn_id }
+                                  if { [regexp {\$[0-9]+\r\n([^\r\n]+)\r\n} $resp -> redis_val] } {
+                                      set state_val $redis_val
+                                      table set -subtable "SESSION_L1" $sid $state_val 300 300
+                                      set persist_source "L2-Redis-dSSM"
+                                  }
+                              }
+                              if { $state_val eq "" } {
+                                  set state_val "origin=${pair_id}"
+                                  set persist_source "NEW-Session-WriteThrough"
+                                  table set -subtable "SESSION_L1" $sid $state_val 300 300
+                                  if { [catch { connect -timeout 1000 -idle 30 -status conn_status ${redis_endpoint} } conn_id] == 0 && $conn_id ne "" } {
+                                      set cmd "SET dssm:state:$sid $state_val EX 1800\r\nQUIT\r\n"
+                                      send -timeout 1000 -status send_status $conn_id $cmd
+                                      set _ [recv -timeout 1000 -status recv_status $conn_id]
+                                      catch { close $conn_id }
+                                  }
+                              }
+                          }
+                      }
+
+                      set body "{\"host\":\"[HTTP::host]\",\"local_addr\":\"[IP::local_addr]\",\"pair\":\"${pair_id}\",\"session_id\":\"$sid\",\"session_state\":\"$state_val\",\"persist_source\":\"$persist_source\"}"
+                      HTTP::respond 200 content $body \
+                          "Content-Type" "application/json" \
+                          "X-Session-ID" $sid \
+                          "X-Session-State" $state_val \
+                          "X-Persist-Source" $persist_source \
+                          "X-BIGIP-Pair" "${pair_id}"
                   }
           Applications:
             class: Tenant
@@ -321,3 +385,4 @@ post_onboard_enabled:
     type: inline
     commands:
       - tmsh save sys config
+      - '[ "{{{ PEER_OWNER_INDEX }}}" = "1" ] && tmsh run sys failover standby || true'

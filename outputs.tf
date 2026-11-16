@@ -41,7 +41,7 @@ output "cluster_tag" {
 }
 
 output "network_endpoints" {
-  value = { for k, v in google_compute_instance.bigip : v.name => {
+  value = { for k, v in google_compute_instance.bigip : k => {
     instance   = v.name
     ip_address = v.network_interface[local.dsc_data_plane_index].network_ip
     zone       = v.zone

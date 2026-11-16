@@ -2,6 +2,7 @@
 
 import ipaddress
 import pathlib
+import uuid
 from collections.abc import Callable, Generator
 from typing import Any, cast
 
@@ -133,6 +134,8 @@ def test_output_values(
         assert address.is_global
     secret_id = cast("str", fixture_output["admin_password_secret_id"])
     assert secret_id
+    redis_endpoint = cast("str", fixture_output["redis_endpoint"])
+    assert redis_endpoint
 
 
 def test_instances(
@@ -163,4 +166,73 @@ def test_vip(
         assert vip
         response = requests.get(url=f"https://{vip}/", verify=False)
         assert response.status_code == requests.codes["ok"]
-        assert response.json
+        assert response.json()
+
+
+def test_l7_state_retained_across_pair_failover(
+    fixture_output: dict[str, Any],
+) -> None:
+    """Verify L7 session state (X-Session-State response header) is retained when moving from pair-01 to pair-02."""
+    assert fixture_output is not None
+    vips = cast("dict[str, str]", fixture_output["vips"])
+    pair1_vip = vips["pair-01"]
+    pair2_vip = vips["pair-02"]
+
+    session_id = str(uuid.uuid4())
+    expected_state = f"state-{uuid.uuid4().hex[:8]}"
+
+    # 1. Establish L7 session state on pair-01 (writes through to L1 local table and L2 shared Redis dSSM store)
+    resp1 = requests.get(
+        url=f"https://{pair1_vip}/",
+        headers={
+            "X-Session-ID": session_id,
+            "X-Session-State": expected_state,
+        },
+        verify=False,
+    )
+    assert resp1.status_code == requests.codes["ok"]
+    assert resp1.headers.get("X-BIGIP-Pair") == "pair-01"
+    assert resp1.headers.get("X-Session-ID") == session_id
+    assert resp1.headers.get("X-Session-State") == expected_state
+    assert resp1.headers.get("X-Persist-Source") == "NEW-Session-WriteThrough"
+
+    # 2. Subsequent request to pair-01 with only X-Session-ID hits pair-01's L1 local TMM table
+    resp2 = requests.get(
+        url=f"https://{pair1_vip}/",
+        headers={
+            "X-Session-ID": session_id,
+        },
+        verify=False,
+    )
+    assert resp2.status_code == requests.codes["ok"]
+    assert resp2.headers.get("X-BIGIP-Pair") == "pair-01"
+    assert resp2.headers.get("X-Session-State") == expected_state
+    assert resp2.headers.get("X-Persist-Source") == "L1-Local-Table"
+
+    # 3. Fail over / direct client to pair-02 with only X-Session-ID (no X-Session-State sent by client);
+    #    pair-02 misses L1, fetches state from L2 shared Redis dSSM, promotes it to L1, and returns the retained header.
+    resp3 = requests.get(
+        url=f"https://{pair2_vip}/",
+        headers={
+            "X-Session-ID": session_id,
+        },
+        verify=False,
+    )
+    assert resp3.status_code == requests.codes["ok"]
+    assert resp3.headers.get("X-BIGIP-Pair") == "pair-02"
+    assert resp3.headers.get("X-Session-State") == expected_state
+    assert resp3.headers.get("X-Persist-Source") == "L2-Redis-dSSM"
+
+    # 4. Subsequent request to pair-02 hits pair-02's L1 local TMM table directly
+    resp4 = requests.get(
+        url=f"https://{pair2_vip}/",
+        headers={
+            "X-Session-ID": session_id,
+        },
+        verify=False,
+    )
+    assert resp4.status_code == requests.codes["ok"]
+    assert resp4.headers.get("X-BIGIP-Pair") == "pair-02"
+    assert resp4.headers.get("X-Session-State") == expected_state
+    assert resp4.headers.get("X-Persist-Source") == "L1-Local-Table"
+

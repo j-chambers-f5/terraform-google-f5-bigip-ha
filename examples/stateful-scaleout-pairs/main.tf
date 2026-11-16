@@ -20,6 +20,15 @@ data "google_compute_subnetwork" "management" {
   self_link = var.interfaces[1].subnet_id
 }
 
+data "google_compute_subnetwork" "internal" {
+  self_link = var.interfaces[2].subnet_id
+}
+
+data "google_compute_zones" "available" {
+  project = var.project_id
+  region  = var.region
+}
+
 provider "google" {
   # Apply a consistent set of labels to all resources that accept labels.
   default_labels = merge({
@@ -35,17 +44,11 @@ locals {
     format("pair-%02d", i) => format("%s-p%02d", var.name, i)
   }
 
-  # Flatten per-pair zonal instance groups for GCE_VM_IP NEGs
-  pair_negs = merge([
-    for pair_key, pair_prefix in local.pairs : {
-      for zone, _ in module.bigip_ha[pair_key].instances_by_zone :
-      format("%s/%s", pair_key, zone) => {
-        pair_key    = pair_key
-        pair_prefix = pair_prefix
-        zone        = zone
-      }
-    }
-  ]...)
+  # Shared L2 Redis / dSSM endpoint used across all BIG-IP HA pairs for cross-pair L7 session state retention
+  redis_endpoint = coalesce(
+    var.redis_endpoint,
+    format("%s:6379", try(google_compute_instance.redis[0].network_interface[0].network_ip, "")),
+  )
 
   # Flatten per-pair network endpoints for registration in zonal GCE_VM_IP NEGs
   pair_endpoints = merge([
@@ -53,7 +56,6 @@ locals {
       for inst_name, ep in module.bigip_ha[pair_key].network_endpoints :
       inst_name => {
         pair_key   = pair_key
-        neg_key    = format("%s/%s", pair_key, ep.zone)
         instance   = ep.instance
         ip_address = ep.ip_address
         zone       = ep.zone
@@ -134,6 +136,45 @@ resource "google_secret_manager_secret_version" "admin_password" {
   ]
 }
 
+# Deploy a lightweight shared L2 Redis-compatible (dSSM) session state store on the internal network when an external
+# redis_endpoint is not provided. All BIG-IP HA pairs read/write L7 session state here on L1 table misses.
+resource "google_compute_instance" "redis" {
+  count        = var.redis_endpoint == null ? 1 : 0
+  project      = var.project_id
+  name         = format("%s-dssm-redis", var.name)
+  description  = "Shared L2 Redis-compatible dSSM session state store for stateful-scaleout-pairs example."
+  zone         = data.google_compute_zones.available.names[0]
+  machine_type = "e2-micro"
+
+  boot_disk {
+    auto_delete = true
+    initialize_params {
+      image = "projects/debian-cloud/global/images/family/debian-12"
+      size  = 10
+      type  = "pd-balanced"
+    }
+  }
+
+  network_interface {
+    subnetwork = data.google_compute_subnetwork.internal.self_link
+  }
+
+  service_account {
+    email = google_service_account.sa.email
+    scopes = [
+      "https://www.googleapis.com/auth/cloud-platform",
+    ]
+  }
+
+  metadata                  = var.metadata
+  metadata_startup_script   = file(format("%s/templates/dssm-redis-startup.sh", path.module))
+  allow_stopping_for_update = true
+
+  depends_on = [
+    google_service_account.sa,
+  ]
+}
+
 # Deploy N independent BIG-IP active-standby HA pairs.
 module "bigip_ha" {
   for_each   = local.pairs
@@ -155,21 +196,24 @@ module "bigip_ha" {
   runtime_init_config = templatefile(format("%s/templates/runtime-init-conf.yaml", path.module), {
     admin_pass_secret = module.admin_password.secret_id
     vip               = google_compute_address.vip[each.key].address
+    pair_id           = each.key
+    redis_endpoint    = local.redis_endpoint
   })
 
   depends_on = [
     google_compute_address.vip,
+    google_compute_instance.redis,
     module.admin_password,
   ]
 }
 
-# Create a zonal GCE_VM_IP Network Endpoint Group in each zone for each HA pair.
+# Create a zonal GCE_VM_IP Network Endpoint Group per BIG-IP instance in each HA pair.
 resource "google_compute_network_endpoint_group" "bigip" {
-  for_each              = local.pair_negs
+  for_each              = local.pair_endpoints
   project               = var.project_id
-  name                  = format("%s-%s", each.value.pair_prefix, each.value.zone)
+  name                  = each.key
   description           = <<-EOD
-    F5 BIG-IP GCE_VM_IP network endpoint group for VEs in ${each.value.pair_key} of stateful-scaleout-pairs example.
+    F5 BIG-IP GCE_VM_IP network endpoint group for ${each.key} (${each.value.pair_key}) in stateful-scaleout-pairs example.
     EOD
   network               = data.google_compute_subnetwork.external.network
   subnetwork            = data.google_compute_subnetwork.external.self_link
@@ -181,11 +225,11 @@ resource "google_compute_network_endpoint_group" "bigip" {
   ]
 }
 
-# Register each BIG-IP instance's primary data-plane interface (nic0) in its pair's zonal GCE_VM_IP NEG.
+# Register each BIG-IP instance's primary data-plane interface (nic0) in its zonal GCE_VM_IP NEG.
 resource "google_compute_network_endpoint" "bigip" {
   for_each               = local.pair_endpoints
   project                = var.project_id
-  network_endpoint_group = google_compute_network_endpoint_group.bigip[each.value.neg_key].name
+  network_endpoint_group = google_compute_network_endpoint_group.bigip[each.key].name
   instance               = each.value.instance
   ip_address             = each.value.ip_address
   zone                   = each.value.zone
@@ -199,21 +243,22 @@ resource "google_compute_network_endpoint" "bigip" {
 # No health check is configured because ha_policy steers all connections exclusively to the active leader endpoint in
 # each pair, updating leadership sub-second when the newly active BIG-IP emits a Gratuitous ARP (GARP) for the VIP.
 resource "google_compute_region_backend_service" "bigip" {
-  for_each              = local.pairs
-  project               = var.project_id
-  name                  = each.value
-  description           = <<-EOD
+  for_each                        = local.pairs
+  project                         = var.project_id
+  name                            = each.value
+  description                     = <<-EOD
     F5 BIG-IP regional backend service with GARP_RA HA policy for ${each.key} in stateful-scaleout-pairs example.
     EOD
-  region                = var.region
-  load_balancing_scheme = "EXTERNAL"
-  protocol              = "TCP"
-  network               = data.google_compute_subnetwork.external.network
+  region                          = var.region
+  load_balancing_scheme           = "EXTERNAL"
+  protocol                        = "TCP"
+  network                         = data.google_compute_subnetwork.external.network
+  connection_draining_timeout_sec = 0
 
   dynamic "backend" {
     for_each = {
       for k, v in google_compute_network_endpoint_group.bigip : k => v
-      if local.pair_negs[k].pair_key == each.key
+      if local.pair_endpoints[k].pair_key == each.key
     }
     content {
       balancing_mode = "CONNECTION"
@@ -224,9 +269,9 @@ resource "google_compute_region_backend_service" "bigip" {
   ha_policy {
     fast_ip_move = "GARP_RA"
     leader {
-      backend_group = google_compute_network_endpoint_group.bigip[format("%s/%s", each.key, module.bigip_ha[each.key].network_endpoints[module.bigip_ha[each.key].names[0]].zone)].self_link
+      backend_group = google_compute_network_endpoint_group.bigip[format("%s-01", each.value)].self_link
       network_endpoint {
-        instance = module.bigip_ha[each.key].names[0]
+        instance = format("%s-01", each.value)
       }
     }
   }
@@ -302,6 +347,49 @@ resource "google_compute_firewall" "mgmt" {
     ports = [
       22,
       443,
+    ]
+  }
+}
+
+# Allow BIG-IP HA peers to exchange TMM state and session-table mirroring over the primary data-plane network.
+resource "google_compute_firewall" "ha_mirror" {
+  project     = var.project_id
+  name        = format("%s-allow-bigip-mirror", var.name)
+  network     = data.google_compute_subnetwork.external.network
+  description = "Allow TMM connection and table mirroring between BIG-IP HA peers"
+  direction   = "INGRESS"
+  source_service_accounts = [
+    google_service_account.sa.email,
+  ]
+  target_service_accounts = [
+    google_service_account.sa.email,
+  ]
+  allow {
+    protocol = "tcp"
+    ports = [
+      "1028-1035",
+    ]
+  }
+}
+
+# Allow all BIG-IP HA pairs to reach the shared L2 Redis / dSSM session store on the internal network.
+resource "google_compute_firewall" "redis" {
+  count       = var.redis_endpoint == null ? 1 : 0
+  project     = var.project_id
+  name        = format("%s-allow-dssm-redis", var.name)
+  network     = data.google_compute_subnetwork.internal.network
+  description = "Allow BIG-IP sideband access to shared L2 Redis dSSM state store on internal network"
+  direction   = "INGRESS"
+  source_service_accounts = [
+    google_service_account.sa.email,
+  ]
+  target_service_accounts = [
+    google_service_account.sa.email,
+  ]
+  allow {
+    protocol = "tcp"
+    ports = [
+      "6379",
     ]
   }
 }

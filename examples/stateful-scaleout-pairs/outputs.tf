@@ -32,3 +32,10 @@ output "pairs_self_links" {
     A map of HA pair identifier to its map of BIG-IP instance names and self-links.
     EOD
 }
+
+output "redis_endpoint" {
+  value       = local.redis_endpoint
+  description = <<-EOD
+    The `<host>:<port>` endpoint of the shared L2 Redis / dSSM session state store on the internal network.
+    EOD
+}

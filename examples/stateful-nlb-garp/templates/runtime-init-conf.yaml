@@ -321,3 +321,4 @@ post_onboard_enabled:
     type: inline
     commands:
       - tmsh save sys config
+      - '[ "{{{ PEER_OWNER_INDEX }}}" = "1" ] && tmsh run sys failover standby || true'

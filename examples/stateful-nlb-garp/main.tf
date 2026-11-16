@@ -127,18 +127,18 @@ module "bigip_ha" {
   ]
 }
 
-# Create a zonal GCE_VM_IP Network Endpoint Group in each zone where BIG-IP instances are deployed.
+# Create a zonal GCE_VM_IP Network Endpoint Group per BIG-IP instance.
 resource "google_compute_network_endpoint_group" "bigip" {
-  for_each = module.bigip_ha.instances_by_zone
-  project  = var.project_id
-  name     = format("%s-%s", var.name, each.key)
-  description = <<-EOD
-    F5 BIG-IP GCE_VM_IP network endpoint group for VEs in stateful-nlb-garp example.
+  for_each              = module.bigip_ha.network_endpoints
+  project               = var.project_id
+  name                  = each.key
+  description           = <<-EOD
+    F5 BIG-IP GCE_VM_IP network endpoint group for ${each.key} in stateful-nlb-garp example.
     EOD
   network               = data.google_compute_subnetwork.external.network
   subnetwork            = data.google_compute_subnetwork.external.self_link
   network_endpoint_type = "GCE_VM_IP"
-  zone                  = each.key
+  zone                  = each.value.zone
 
   depends_on = [
     module.bigip_ha,
@@ -149,7 +149,7 @@ resource "google_compute_network_endpoint_group" "bigip" {
 resource "google_compute_network_endpoint" "bigip" {
   for_each               = module.bigip_ha.network_endpoints
   project                = var.project_id
-  network_endpoint_group = google_compute_network_endpoint_group.bigip[each.value.zone].name
+  network_endpoint_group = google_compute_network_endpoint_group.bigip[each.key].name
   instance               = each.value.instance
   ip_address             = each.value.ip_address
   zone                   = each.value.zone
@@ -163,15 +163,16 @@ resource "google_compute_network_endpoint" "bigip" {
 # No health check is configured because ha_policy steers all connections exclusively to the active leader endpoint,
 # updating leadership sub-second when the newly active BIG-IP emits a Gratuitous ARP (GARP) for the VIP.
 resource "google_compute_region_backend_service" "bigip" {
-  project     = var.project_id
-  name        = var.name
-  description = <<-EOD
+  project                         = var.project_id
+  name                            = var.name
+  description                     = <<-EOD
     F5 BIG-IP regional backend service with GARP_RA HA policy for stateful-nlb-garp example.
     EOD
-  region                = var.region
-  load_balancing_scheme = "EXTERNAL"
-  protocol              = "TCP"
-  network               = data.google_compute_subnetwork.external.network
+  region                          = var.region
+  load_balancing_scheme           = "EXTERNAL"
+  protocol                        = "TCP"
+  network                         = data.google_compute_subnetwork.external.network
+  connection_draining_timeout_sec = 0
 
   dynamic "backend" {
     for_each = google_compute_network_endpoint_group.bigip
@@ -184,9 +185,9 @@ resource "google_compute_region_backend_service" "bigip" {
   ha_policy {
     fast_ip_move = "GARP_RA"
     leader {
-      backend_group = google_compute_network_endpoint_group.bigip[module.bigip_ha.network_endpoints[module.bigip_ha.names[0]].zone].self_link
+      backend_group = google_compute_network_endpoint_group.bigip[format("%s-01", var.name)].self_link
       network_endpoint {
-        instance = module.bigip_ha.names[0]
+        instance = format("%s-01", var.name)
       }
     }
   }

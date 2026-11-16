@@ -111,3 +111,14 @@ variable "mgmt_allowlist_cidrs" {
   and not empty, an example GCP Firewall rule will be created to allow access to management interfaces.
   EOD
 }
+
+variable "redis_endpoint" {
+  type        = string
+  nullable    = true
+  default     = null
+  description = <<-EOD
+  An optional `<host>:<port>` endpoint for an existing shared Redis / dSSM state store routable from the internal
+  interface (`eth2`). When `null` (default), a lightweight compute instance running a Redis-compatible RESP state store
+  on `tcp:6379` is provisioned automatically on the internal subnetwork (`var.interfaces[2].subnet_id`).
+  EOD
+}

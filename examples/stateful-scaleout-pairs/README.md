@@ -15,6 +15,13 @@ Groups (NEGs). The characteristics of this deployment are:
   * On failover within a pair, the newly active BIG-IP VE emits a Gratuitous ARP (`GARP`) announcement for that pair's
     VIP on its primary data-plane interface (`eth0`), triggering sub-second NLB leader convergence
     (`fast_ip_move = "GARP_RA"`) without affecting any other pair
+* Cross-pair L7 application session state is retained using a two-tier (`L1` + `L2`) `dSSM`-equivalent persistence model:
+  * **Tier 1 (`L1` Intra-Pair State):** Each HA pair stores active session state in its local TMM in-memory `[table]`
+    (`SESSION_L1`), mirrored between the active and standby VEs within that pair (`MirrorIp`)
+  * **Tier 2 (`L2` Cross-Pair State):** All HA pairs share a lightweight Redis-compatible (`dSSM`) session store on the
+    internal data-plane network (`eth2`, `tcp:6379`). When a client session is established on `pair-01` and later
+    moves or fails over to `pair-02`, `pair-02` misses its local `L1` table, retrieves the session state (`X-Session-State`)
+    from `L2` Redis via sideband TCP, and promotes it into `pair-02`'s local `L1` table
 
 ![Scale-out BIG-IP VE active-standby pairs with NLB and GARP](./deployment.png)
 *Figure 1: The resources created by this example.*
@@ -78,6 +85,22 @@ Groups (NEGs). The characteristics of this deployment are:
    terraform apply
    ```
 
+1. Verify cross-pair L7 session state retention
+
+   ```shell
+   PAIR1_VIP=$(terraform output -json vips | jq -r '.["pair-01"]')
+   PAIR2_VIP=$(terraform output -json vips | jq -r '.["pair-02"]')
+
+   # 1. Establish L7 state on pair-01 (writes to L1 local table + L2 Redis dSSM)
+   curl -skD - -H "X-Session-ID: demo-123" -H "X-Session-State: user-tier-gold" "https://${PAIR1_VIP}/"
+
+   # 2. Repeat request on pair-01 with only X-Session-ID (hits L1-Local-Table)
+   curl -skD - -H "X-Session-ID: demo-123" "https://${PAIR1_VIP}/"
+
+   # 3. Fail over / connect to pair-02 with only X-Session-ID; X-Session-State is retained via L2-Redis-dSSM
+   curl -skD - -H "X-Session-ID: demo-123" "https://${PAIR2_VIP}/"
+   ```
+
 1. Tear down resources after testing
 
    ```shell
@@ -123,9 +146,12 @@ ownership.
 | Name | Type |
 | ---- | ---- |
 | [google_compute_address.vip](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_address) | resource |
+| [google_compute_firewall.ha_mirror](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall) | resource |
 | [google_compute_firewall.mgmt](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall) | resource |
 | [google_compute_firewall.public](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall) | resource |
+| [google_compute_firewall.redis](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall) | resource |
 | [google_compute_forwarding_rule.vip](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_forwarding_rule) | resource |
+| [google_compute_instance.redis](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_instance) | resource |
 | [google_compute_network_endpoint.bigip](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_endpoint) | resource |
 | [google_compute_network_endpoint_group.bigip](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network_endpoint_group) | resource |
 | [google_compute_region_backend_service.bigip](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_region_backend_service) | resource |
@@ -133,7 +159,9 @@ ownership.
 | [google_service_account.sa](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account) | resource |
 | [random_string.admin_password](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/string) | resource |
 | [google_compute_subnetwork.external](https://registry.terraform.io/providers/hashicorp/google/latest/docs/data-sources/compute_subnetwork) | data source |
+| [google_compute_subnetwork.internal](https://registry.terraform.io/providers/hashicorp/google/latest/docs/data-sources/compute_subnetwork) | data source |
 | [google_compute_subnetwork.management](https://registry.terraform.io/providers/hashicorp/google/latest/docs/data-sources/compute_subnetwork) | data source |
+| [google_compute_zones.available](https://registry.terraform.io/providers/hashicorp/google/latest/docs/data-sources/compute_zones) | data source |
 
 ## Inputs
 
@@ -148,6 +176,7 @@ ownership.
 | <a name="input_metadata"></a> [metadata](#input\_metadata) | An optional map of metadata strings to add to all BIG-IP instances. | `map(string)` | `null` | no |
 | <a name="input_mgmt_allowlist_cidrs"></a> [mgmt\_allowlist\_cidrs](#input\_mgmt\_allowlist\_cidrs) | An optional list of CIDRs to be permitted access to BIG-IP management interfaces. If the list is not null (default)<br/>and not empty, an example GCP Firewall rule will be created to allow access to management interfaces. | `list(string)` | `null` | no |
 | <a name="input_num_pairs"></a> [num\_pairs](#input\_num\_pairs) | The number of independent active-standby BIG-IP HA pairs to provision. Default is 2 pairs (4 BIG-IP VE instances). | `number` | `2` | no |
+| <a name="input_redis_endpoint"></a> [redis\_endpoint](#input\_redis\_endpoint) | An optional `<host>:<port>` endpoint for an existing shared Redis / dSSM state store routable from the internal<br/>interface (`eth2`). When `null` (default), a lightweight compute instance running a Redis-compatible RESP state store<br/>on `tcp:6379` is provisioned automatically on the internal subnetwork (`var.interfaces[2].subnet_id`). | `string` | `null` | no |
 
 ## Outputs
 
@@ -155,6 +184,7 @@ ownership.
 | ---- | ----------- |
 | <a name="output_admin_password_secret_id"></a> [admin\_password\_secret\_id](#output\_admin\_password\_secret\_id) | The Secret Manager secret identifier containing the BIG-IP admin password shared across all HA pairs. |
 | <a name="output_pairs_self_links"></a> [pairs\_self\_links](#output\_pairs\_self\_links) | A map of HA pair identifier to its map of BIG-IP instance names and self-links. |
+| <a name="output_redis_endpoint"></a> [redis\_endpoint](#output\_redis\_endpoint) | The `<host>:<port>` endpoint of the shared L2 Redis / dSSM session state store on the internal network. |
 | <a name="output_self_links"></a> [self\_links](#output\_self\_links) | A flattened map of BIG-IP instance name to fully-qualified self-link across all HA pairs. |
 | <a name="output_vip"></a> [vip](#output\_vip) | The public VIP address for the primary HA pair (`pair-01`). |
 | <a name="output_vips"></a> [vips](#output\_vips) | A map of HA pair identifier (e.g. `pair-01`, `pair-02`) to the public VIP address for that pair. |

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/j-chambers-f5/terraform-google-f5-bigip-ha/compare/v0.2.3...v0.3.0) (2026-11-16)
+
+
+### Features
+
+* Add stateful-nlb-garp and stateful-scaleout-pairs examples ([de483d7](https://github.com/j-chambers-f5/terraform-google-f5-bigip-ha/commit/de483d722176ce4355f834b18890302605c01006))
+* **stateful-scaleout-pairs:** add cross-pair L7 dSSM session state retention app and test ([e94d07b](https://github.com/j-chambers-f5/terraform-google-f5-bigip-ha/commit/e94d07bdf591c2a7259688dfed97cb04beb9d908))
+
+
+### Bug Fixes
+
+* **tests:** align ruff check in test_stateful_scaleout_pairs workflow ([b69f749](https://github.com/j-chambers-f5/terraform-google-f5-bigip-ha/commit/b69f749577fc4cc1c55f14078631b8ba75be7e23))
+
 ## [0.2.3](https://github.com/f5devcentral/terraform-google-f5-bigip-ha/compare/v0.2.2...v0.2.3) (2026-05-01)
 
 
